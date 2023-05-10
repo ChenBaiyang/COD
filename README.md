@@ -25,12 +25,12 @@ We use 15 public datasets to assess the model performances, including 2 nominal,
 
 
 ## Environment
-cudatoolkit=11.6.0
-numpy=1.23.5
-pandas=1.5.3
-python=3.8.16
-pytorch=1.12.1
-scikit-learn=1.2.0
-scipy=1.9.3
-torchaudio=0.12.1
-torchvision=0.13.1
+* cudatoolkit=11.6.0
+* numpy=1.23.5
+* pandas=1.5.3
+* python=3.8.16
+* pytorch=1.12.1
+* scikit-learn=1.2.0
+* scipy=1.9.3
+* torchaudio=0.12.1
+* torchvision=0.13.1
