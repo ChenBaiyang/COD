@@ -2,7 +2,7 @@
 The code and dataset for paper "Consistency-guided semi-supervised outlier detection in heterogeneous data using fuzzy rough sets".
 
 ## Datasets
-We use 15 public datasets to assess the model performances, including 2 nominal, 2 mixed, and 11 numerical datasets. The number of samples in a dataset range from 351 to 11183, and the ratio of anomalies varies between 2\% and 35.9\%. The details of the datasets are provided in Table \ref{tab:datasets}. 
+We use 15 public datasets to assess the model performances, including 2 nominal, 2 mixed, and 11 numerical datasets. The number of samples in a dataset range from 351 to 11183, and the ratio of anomalies varies between 2% and 35.9%. The details of the datasets are provided in below table: 
 
 
 | No 	|   Datasets  	| #Samples 	| #Attributes 	| #Outlier 	| %Outlier 	|   Category  	|   DataType  	|
