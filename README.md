@@ -4,6 +4,9 @@ Baiyang Chen and Zhong Yuan* and Dezhong Peng and Xiaoliang Chen and Hongmei Che
 ## Abstract
 Outlier detection aims to find objects that behave differently from the majority of the data. Semi-supervised detection methods can utilize the supervision of partial labels, thus reducing false positive rates. However, most of the current semi-supervised methods focus on numerical data and neglect the heterogeneity of data information. In this paper, we propose a consistency-guided outlier detection algorithm (COD) for heterogeneous data with the fuzzy rough set theory in a semi-supervised manner. First, a few labeled outliers are leveraged to construct label-informed fuzzy similarity relations. Next, the consistency of the fuzzy decision system is introduced to evaluate attributes’ contributions to knowledge classification. Subsequently, we define the outlier factor based on the fuzzy similarity class and predict outliers by integrating the classification consistency and the outlier factor. The proposed algorithm is extensively evaluated on 20 freshly proposed datasets. Experimental results demonstrate that COD is better than or comparable with the leading outlier detectors.
 
+## Framework
+
+
 ## Datasets
 We use 15 public datasets to assess the model performances, including 2 nominal, 2 mixed, and 11 numerical datasets. The number of samples in a dataset ranges from 351 to 11183, and the ratio of anomalies varies between 2% and 35.9%. The details of the datasets are provided in below table: 
 
@@ -76,4 +79,4 @@ or:
 Baiyang Chen, Zhong Yuan*, Dezhong Peng, et al., "[Consistency-guided semi-supervised outlier detection in heterogeneous data using fuzzy rough sets](https://doi.org/10.1016/j.asoc.2024.112070)," Applied Soft Computing, vol. 103, p. 112070, 2024, DOI: 10.1016/j.asoc.2024.112070
 
 ## Contact
-If you have any questions, please contact farstars@qq.com
+If you have any questions, please contact farstars@qq.com.
