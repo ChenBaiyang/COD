@@ -5,7 +5,7 @@ Baiyang Chen and Zhong Yuan* and Dezhong Peng and Xiaoliang Chen and Hongmei Che
 Outlier detection aims to find objects that behave differently from the majority of the data. Semi-supervised detection methods can utilize the supervision of partial labels, thus reducing false positive rates. However, most of the current semi-supervised methods focus on numerical data and neglect the heterogeneity of data information. In this paper, we propose a consistency-guided outlier detection algorithm (COD) for heterogeneous data with the fuzzy rough set theory in a semi-supervised manner. First, a few labeled outliers are leveraged to construct label-informed fuzzy similarity relations. Next, the consistency of the fuzzy decision system is introduced to evaluate attributes’ contributions to knowledge classification. Subsequently, we define the outlier factor based on the fuzzy similarity class and predict outliers by integrating the classification consistency and the outlier factor. The proposed algorithm is extensively evaluated on 20 freshly proposed datasets. Experimental results demonstrate that COD is better than or comparable with the leading outlier detectors.
 
 ## Framework
-![image](Paper/COD_Framework.pdf)
+![image](Paper/COD_Framework.png)
 
 ## Datasets
 We use 15 public datasets to assess the model performances, including 2 nominal, 2 mixed, and 11 numerical datasets. The number of samples in a dataset ranges from 351 to 11183, and the ratio of anomalies varies between 2% and 35.9%. The details of the datasets are provided in below table: 
