@@ -1,67 +1,116 @@
-import os
+"""Run COD experiments on the bundled datasets."""
+
+import argparse
+import csv
+from datetime import datetime
+import json
+from pathlib import Path
+import time
+
 import numpy as np
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import average_precision_score, roc_auc_score
+
 from model import COD
 
-def get_train_data(data, label, train_ratio, seed):
-    n, m = data.shape
-    data_label = np.concatenate([data, np.arange(n).reshape((n, 1))], axis=1)
-    data_negative = data_label[label != 1]
-    data_positive = data_label[label == 1]
-    n_train_neg = round(len(data_negative) * train_ratio)
-    n_train_pos = round(len(data_positive) * train_ratio)
-    if n_train_pos <1:
-        print('Training without labeled anomaly.')
-    n_train = n_train_pos + n_train_neg
-    n_train, n_train_neg, n_train_pos = n_train, n_train_neg, n_train_pos
 
-    np.random.seed(seed)
-    np.random.shuffle(data_negative)
-    np.random.seed(seed)
-    np.random.shuffle(data_positive)
-
-    train, test = data_negative[:n_train_neg], data_negative[n_train_neg:]
-    train_x_n, test_x_n = train[:, :-1], test[:, :-1]
-    train_y_n, test_y_n = train[:, -1], test[:, -1]
-
-    train, test = data_positive[:n_train_pos], data_positive[n_train_pos:]
-    train_x_p, test_x_p = train[:, :-1], test[:, :-1]
-    train_y_p, test_y_p = train[:, -1], test[:, -1]
-    train_x = np.concatenate([train_x_p, train_x_n])
-    train_y = np.concatenate([np.ones_like(train_y_p, dtype=np.int32), np.zeros_like(train_y_n, dtype=np.int32)])
-    test_x = np.concatenate([test_x_p, test_x_n])
-    test_y = np.concatenate([np.ones_like(test_y_p, dtype=np.int32), np.zeros_like(test_y_n, dtype=np.int32)])
-    return train_x, train_y, test_x, test_y
+ROOT = Path(__file__).resolve().parent
 
 
-result_file_name = 'results_COD.csv'
-open(result_file_name, 'w').write('dataset, model, n_train,seed,auc,pr\n')
-
-fdir = 'data/'
-dataset_list = np.array(os.listdir(fdir))
-for dataset in dataset_list:
-    d = np.load(fdir+dataset)
-    data = d['X']  # the data are already min-maxed to [0,1].
-    label = d['y'] # 1 indicate positive (outliers), 0 represent negative (normal).
-
-    ### Removing redundant attributes if their std is very low.
-    valids = np.std(data, axis=0) > 1e-6
-    data = data[:, valids]
-    n, m = data.shape
-    nominals = d['nominals'][valids]  # Nominal attributes are marked True, otherwize False.
-    print("Data shape:{}  # Outlier:{} # Nominals:{}".format((n, m), label.sum(), nominals.sum()))
-
-    for n_train in [0.01]:
-        for seed in range(2023, 2033, 1):
-            train_X, train_y, test_X, test_y = get_train_data(data, label, n_train, seed)
-            train_X, test_X = train_X[:, :, np.newaxis], test_X[:, :, np.newaxis]
-            model = COD().fit(train_X, train_y, nominals)
-            out_scores = model.predict_score(test_X)
-
-            auc = roc_auc_score(test_y, out_scores)
-            pr = average_precision_score(y_true=test_y, y_score=out_scores, pos_label=1)
-            print(dataset[:-4], model.lamb, n_train, seed, auc, pr)
-            scores = [dataset[:-4], 'COD', str(n_train), str(seed), str(auc)[:8], str(pr)[:8]]
-            open(result_file_name, 'a').write(','.join(scores) + '\n')
+def load_dataset(path):
+    """Load features, evaluation labels, and attribute types."""
+    with np.load(path) as archive:
+        X, y, nominal = archive["X"], archive["y"], archive["nominals"]
+    if X.ndim != 2 or not np.isfinite(X).all():
+        raise ValueError("Dataset X must be a finite 2D array")
+    if y.shape != (len(X),) or not np.isin(y, [0, 1]).all():
+        raise ValueError("Dataset y must be a binary vector")
+    valid = np.std(X, axis=0) > 1e-6
+    return X[:, valid], y.astype(bool), nominal[valid]
 
 
+def select_known_outliers(y, seed, n_labeled_outliers=5):
+    """Simulate known labels and exclude them from evaluation."""
+    positives = np.flatnonzero(y)
+    if not 0 < n_labeled_outliers < len(positives) or y.all():
+        raise ValueError("Need normal rows and more anomalies than the labeled count")
+    known = np.random.RandomState(seed).choice(positives, n_labeled_outliers, replace=False)
+    train_y = np.zeros(len(y), dtype=np.int8)
+    train_y[known] = 1
+    return known, train_y, train_y == 0
+
+
+def run_experiments(datasets=None, seeds=tuple(range(2023, 2033)), output_dir=None,
+                    n_labeled_outliers=5, n_neg=100, batch_size=256, data_dir=ROOT / "data",
+                    normalize=True):
+    """Write per-seed metrics and their summary to a new output directory."""
+    available = {p.stem.lower(): p for p in Path(data_dir).glob("*.npz")}
+    keys = sorted(available) if datasets is None else [Path(d).stem.lower() for d in datasets]
+    if not keys or len(set(keys)) != len(keys):
+        raise ValueError("Select at least one dataset, without duplicates")
+    paths = [available[key] for key in keys]
+    seeds = list(seeds)
+    if not seeds or len(set(seeds)) != len(seeds):
+        raise ValueError("Provide at least one seed, without duplicates")
+    if output_dir is None:
+        output_dir = ROOT / "outputs" / datetime.now().strftime("cod-%Y%m%d-%H%M%S-%f")
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    fields = ["dataset", "model", "seed", "n_labeled_outliers", "n_neg", "n_test",
+              "n_features", "auroc", "ap", "elapsed_seconds", "known_outlier_indices"]
+    summary = []
+    print("Output: " + str(output_dir), flush=True)
+    with (output_dir / "results_COD.csv").open("x", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for path in paths:
+            X, y, nominal = load_dataset(path)
+            metrics = []
+            for seed in seeds:
+                tick = time.perf_counter()
+                known, train_y, test = select_known_outliers(y, seed, n_labeled_outliers)
+                model = COD(n_neg=n_neg, batch_size=batch_size, normalize=normalize).fit(X, train_y, nominal)
+                scores = model.predict_score()
+                auroc = float(roc_auc_score(y[test], scores[test]))
+                ap = float(average_precision_score(y[test], scores[test]))
+                writer.writerow(dict(dataset=path.stem, model="COD", seed=seed,
+                                     n_labeled_outliers=n_labeled_outliers,
+                                     n_neg=min(n_neg, len(X) - len(known)), n_test=int(test.sum()),
+                                     n_features=X.shape[1], auroc=auroc, ap=ap,
+                                     elapsed_seconds=time.perf_counter() - tick,
+                                     known_outlier_indices=json.dumps(known.tolist())))
+                handle.flush()
+                metrics.append((auroc, ap))
+                print("{} seed={} AUROC={:.8f} AP={:.8f}".format(path.stem, seed, auroc, ap),
+                      flush=True)
+            metrics = np.asarray(metrics)
+            summary.append(dict(dataset=path.stem, n_runs=len(seeds),
+                                auroc_mean=float(metrics[:, 0].mean()),
+                                auroc_std=float(metrics[:, 0].std()),
+                                ap_mean=float(metrics[:, 1].mean()),
+                                ap_std=float(metrics[:, 1].std())))
+    summary.append(dict(dataset="Average", n_runs=len(paths) * len(seeds),
+                        auroc_mean=float(np.mean([r["auroc_mean"] for r in summary])), auroc_std="",
+                        ap_mean=float(np.mean([r["ap_mean"] for r in summary])), ap_std=""))
+    with (output_dir / "summary_COD.csv").open("x", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(summary[0]))
+        writer.writeheader()
+        writer.writerows(summary)
+    return output_dir
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--datasets", nargs="+", help="Dataset names; default: all bundled datasets")
+    parser.add_argument("--seeds", nargs="+", type=int, default=list(range(2023, 2033)))
+    parser.add_argument("--output-dir", type=Path, help="New output directory")
+    parser.add_argument("--n-labeled-outliers", type=int, default=5)
+    parser.add_argument("--n-neg", type=int, default=100)
+    parser.add_argument("--batch-size", type=int, default=256)
+    parser.add_argument("--no-normalize", dest="normalize", action="store_false",
+                        help="Use numerical inputs already normalized to [0, 1]")
+    parser.add_argument("--data-dir", type=Path, default=ROOT / "data")
+    run_experiments(**vars(parser.parse_args(argv)))
+
+
+if __name__ == "__main__":
+    main()

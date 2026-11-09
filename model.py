@@ -1,69 +1,138 @@
-import itertools as its
-from sklearn.metrics import roc_auc_score
+"""Consistency-guided outlier detection, following Eqs. (5)-(14) of COD."""
+
 import numpy as np
-from sklearn.preprocessing import minmax_scale
-import torch
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def relation_matrix_torch(vec1, vec2, e):
-    dist_matrix = torch.cdist(vec1, vec2, p=1)
-    if e == -1:
-        return dist_matrix < 1e-6
-    lamb = dist_matrix.mean() * e
-    relation_matrix = 1 - dist_matrix
-    relation_matrix[dist_matrix > lamb] = 0
-    return relation_matrix
+RADIUS_GRID = np.arange(1, 1000, dtype=np.float64) / 1000
 
-class COD(object):
-    def __init__(self):
-        pass
 
-    def __make_cardinality__(self, X):
-        n, m, _ = X.shape
-        X = torch.tensor(X, dtype=torch.float32)
-        M_R_c = torch.zeros((m, n, n), dtype=torch.float32)
-        for j in range(m):
-            M_R_c[j] = relation_matrix_torch(X[:, j], X[:, j], self.lambs[j])
-        card1 = M_R_c.sum(dim=1) / n
+def _cardinality_curve(values, indices):
+    """Mean normalized cardinality at each radius (Eq. 6)."""
+    distances = np.abs(values[indices, None] - values[None, :]).ravel()
+    distances.sort()
+    cumulative = np.concatenate(([0.0], np.cumsum(1 - distances)))
+    stops = np.searchsorted(distances, RADIUS_GRID, side="right")
+    return cumulative[stops] / len(distances)
 
-        card2 = torch.zeros((m * (m - 1) // 2, n), dtype=torch.float32)
-        for idx, l in enumerate(its.combinations(range(m), 2)):
-            M_R_B = M_R_c[list(l)]
-            temp = torch.min(M_R_B, dim=0)[0]
-            card2[idx] = temp.sum(dim=1) / n
-        return np.concatenate([card1, card2])
 
-    def fit_gamma(self, X, train_y, alpha=1, pruning=None, threshold=0.1, batch=False):
-        """to be uploaded later"""
-        pass
+def _learn_radius(values, positive, negative):
+    objective = (_cardinality_curve(values, negative)
+                 - _cardinality_curve(values, positive))
+    # Ascending grid and first argmax resolve ties toward smaller radii.
+    return float(RADIUS_GRID[np.argmax(objective)])
 
-    def fit(self, train_X, train_y, nominals, alpha=1):
-        m = len(nominals)
-        results = []
-        gammas = []
-        lambdas = (0.1 * np.float_power(1.5, np.arange(10))).round(3)
-        for lamb in lambdas:
-            self.lambs = np.full(m, lamb)
-            self.lambs[nominals] = -1
-            self.fit_gamma(train_X, train_y, alpha=alpha)
-            gammas.append(self.gamma)
-            results.append(self.train_auc)
-            if nominals.sum() == m:
-                break
 
-        gammas = np.array(gammas)
-        results = np.array(results)
-        best_auc = np.max(results)
-        best_idxs = np.where(results > best_auc - 1e-6)[0]
-        best_idx = best_idxs[(len(best_idxs)-1) // 2]
-        self.lamb = lambdas[best_idx]
-        self.gamma = gammas[best_idx]
-        self.lambs = np.full(m, self.lamb)
-        self.lambs[nominals] = -1
+def _relation(left, right, nominal, radius):
+    if nominal:
+        return (left[:, None] == right[None, :]).astype(np.float64)
+    distances = np.abs(left[:, None] - right[None, :])
+    return np.where(distances <= radius, 1 - distances, 0.0)
+
+
+def _minmax_scale(X, nominals):
+    """Scale numerical columns to [0, 1]; keep categorical codes unchanged."""
+    X = X.copy()
+    numerical = ~nominals
+    if numerical.any():
+        values = X[:, numerical]
+        minimum = values.min(axis=0)
+        span = np.ptp(values, axis=0)
+        span[span == 0] = 1
+        X[:, numerical] = (values - minimum) / span
+    return X
+
+
+class COD:
+    """Transductive COD; larger scores indicate stronger outlier evidence.
+
+    Numerical features are min-max normalized over the fitted universe.
+    Nominal features are equality-coded numbers and are not scaled. Computation
+    uses CPU NumPy float64. batch_size limits relation rows, not the universe.
+    """
+
+    def __init__(self, n_neg=100, batch_size=256, normalize=True):
+        self.n_neg = n_neg
+        self.batch_size = batch_size
+        self.normalize = normalize
+        self._fitted = False
+
+    def _blocks(self, n):
+        for start in range(0, n, self.batch_size):
+            yield slice(start, min(start + self.batch_size, n))
+
+    def _negative_indices(self, values, nominal, unlabeled):
+        n = len(values)
+        distances = np.empty(n, dtype=np.float64)
+        for block in self._blocks(n):
+            if nominal:
+                matrix = values[block, None] != values[None, :]
+            else:
+                matrix = np.abs(values[block, None] - values[None, :])
+            distances[block] = matrix.mean(axis=1)
+        # unlabeled is in row order; stable sorting preserves the tie order.
+        order = np.argsort(distances[unlabeled], kind="stable")
+        return unlabeled[order[:self.n_neg]]
+
+    def fit(self, X, train_y, nominals):
+        """Fit the entire universe with 1=known outlier, 0=unlabeled.
+
+        X accepts (n, m) or (n, m, 1); nominals is a Boolean/0-1 column mask.
+        """
+        self._fitted = False
+        if any(isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, np.integer))
+               or v <= 0 for v in (self.n_neg, self.batch_size)):
+            raise ValueError("n_neg and batch_size must be positive integers")
+        X = np.asarray(X, dtype=np.float64)
+        if X.ndim == 3 and X.shape[-1] == 1:
+            X = X[..., 0]
+        if X.ndim != 2 or X.shape[0] < 2 or X.shape[1] == 0:
+            raise ValueError("X must have shape (n>=2, m>=1) or (n, m, 1)")
+        if not np.isfinite(X).all():
+            raise ValueError("X must contain finite values")
+        n, m = X.shape
+        nominal = np.asarray(nominals)
+        if nominal.shape != (m,) or not np.isin(nominal, [0, 1]).all():
+            raise ValueError("nominals must be a Boolean/0-1 mask over columns")
+        nominal = nominal.astype(bool)
+        if self.normalize:
+            X = _minmax_scale(X, nominal)
+        numerical = X[:, ~nominal]
+        if numerical.size and ((numerical < -1e-12).any()
+                               or (numerical > 1 + 1e-12).any()):
+            raise ValueError("Numerical features must be normalized to [0, 1]")
+        labels = np.asarray(train_y)
+        if labels.shape != (n,) or not np.isin(labels, [0, 1]).all():
+            raise ValueError("train_y must be a 1D 0-1 known-outlier mask")
+        positive = np.flatnonzero(labels == 1)
+        unlabeled = np.flatnonzero(labels == 0)
+        if len(positive) == 0 or len(unlabeled) == 0:
+            raise ValueError("At least one known outlier and one unlabeled row are required")
+
+        self.radii_ = np.full(m, -1.0)  # Nominal equality has no learned radius.
+        self.consistencies_ = np.empty(m)
+        cardinalities = np.empty((m, n))  # Normalized by the full |U|.
+        for feature in range(m):
+            values = X[:, feature]
+            negative = self._negative_indices(values, nominal[feature], unlabeled)
+            if not nominal[feature]:
+                self.radii_[feature] = _learn_radius(values, positive, negative)
+            radius = self.radii_[feature]
+            # For crisp classes, Eq. (2) reduces to the minimum complement
+            # of the relation to the opposite class.
+            cross = _relation(values[positive], values[negative], nominal[feature], radius)
+            complements = 1 - cross
+            self.consistencies_[feature] = (complements.min(axis=1).mean()
+                                            + complements.min(axis=0).mean())
+            for block in self._blocks(n):
+                relation = _relation(values[block], values, nominal[feature], radius)
+                cardinalities[feature, block] = relation.mean(axis=1)
+        self.decision_scores_ = ((1 - cardinalities)
+                                 * self.consistencies_[:, None]).mean(axis=0)
+        self._fitted = True
         return self
 
-    def predict_score(self, X = None):
-        card = self.__make_cardinality__(X)
-        OD = ((1 - card) * np.expand_dims(self.gamma, axis=1)).mean(axis=0)
-        return OD
+    def predict_score(self):
+        """Return a copy of scores for the fitted universe, in input row order."""
+        if not self._fitted:
+            raise RuntimeError("Call fit before predict_score")
+        return self.decision_scores_.copy()
