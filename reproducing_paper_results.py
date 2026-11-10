@@ -10,7 +10,7 @@ import time
 import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 
-from model import COD
+from cod import COD
 
 
 ROOT = Path(__file__).resolve().parent
@@ -19,13 +19,17 @@ ROOT = Path(__file__).resolve().parent
 def load_dataset(path):
     """Load features, evaluation labels, and attribute types."""
     with np.load(path) as archive:
-        X, y, nominal = archive["X"], archive["y"], archive["nominals"]
+        X, y = archive["X"], archive["y"]
+        nominal = archive["nominals"] if "nominals" in archive else None
     if X.ndim != 2 or not np.isfinite(X).all():
         raise ValueError("Dataset X must be a finite 2D array")
     if y.shape != (len(X),) or not np.isin(y, [0, 1]).all():
         raise ValueError("Dataset y must be a binary vector")
+    if nominal is not None and (nominal.shape != (X.shape[1],)
+                                or not np.isin(nominal, [0, 1]).all()):
+        raise ValueError("Dataset nominals must be a Boolean/0-1 column mask")
     valid = np.std(X, axis=0) > 1e-6
-    return X[:, valid], y.astype(bool), nominal[valid]
+    return X[:, valid], y.astype(bool), None if nominal is None else nominal[valid]
 
 
 def select_known_outliers(y, seed, n_labeled_outliers=5):
@@ -55,15 +59,21 @@ def run_experiments(datasets=None, seeds=tuple(range(2023, 2033)), output_dir=No
         output_dir = ROOT / "outputs" / datetime.now().strftime("cod-%Y%m%d-%H%M%S-%f")
     output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
-    fields = ["dataset", "model", "seed", "n_labeled_outliers", "n_neg", "n_test",
+    fields = ["dataset", "model", "seed", "n_labeled_outliers", "n_neg_requested", "n_neg",
+              "normalize", "batch_size", "n_test",
               "n_features", "auroc", "ap", "elapsed_seconds", "known_outlier_indices"]
     summary = []
     print("Output: " + str(output_dir), flush=True)
     with (output_dir / "results_COD.csv").open("x", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
-        for path in paths:
+        for index, path in enumerate(paths, 1):
             X, y, nominal = load_dataset(path)
+            actual_n_neg = min(n_neg, len(X) - n_labeled_outliers)
+            print("[{}/{}] {}: samples={} features={} labeled={} n_neg={}/{} "
+                  "(actual/requested) normalize={} batch_size={}".format(
+                      index, len(paths), path.stem, len(X), X.shape[1], n_labeled_outliers,
+                      actual_n_neg, n_neg, normalize, batch_size), flush=True)
             metrics = []
             for seed in seeds:
                 tick = time.perf_counter()
@@ -74,7 +84,8 @@ def run_experiments(datasets=None, seeds=tuple(range(2023, 2033)), output_dir=No
                 ap = float(average_precision_score(y[test], scores[test]))
                 writer.writerow(dict(dataset=path.stem, model="COD", seed=seed,
                                      n_labeled_outliers=n_labeled_outliers,
-                                     n_neg=min(n_neg, len(X) - len(known)), n_test=int(test.sum()),
+                                     n_neg_requested=n_neg, n_neg=actual_n_neg,
+                                     normalize=normalize, batch_size=batch_size, n_test=int(test.sum()),
                                      n_features=X.shape[1], auroc=auroc, ap=ap,
                                      elapsed_seconds=time.perf_counter() - tick,
                                      known_outlier_indices=json.dumps(known.tolist())))

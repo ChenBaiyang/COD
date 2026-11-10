@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 outputs/
 ~$*
+build/
+dist/
+*.egg-info/

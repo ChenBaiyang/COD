@@ -2,6 +2,8 @@
 
 import numpy as np
 
+from .preprocessing import _infer_nominals, minmax_scale
+
 
 RADIUS_GRID = np.arange(1, 1000, dtype=np.float64) / 1000
 
@@ -27,19 +29,6 @@ def _relation(left, right, nominal, radius):
         return (left[:, None] == right[None, :]).astype(np.float64)
     distances = np.abs(left[:, None] - right[None, :])
     return np.where(distances <= radius, 1 - distances, 0.0)
-
-
-def _minmax_scale(X, nominals):
-    """Scale numerical columns to [0, 1]; keep categorical codes unchanged."""
-    X = X.copy()
-    numerical = ~nominals
-    if numerical.any():
-        values = X[:, numerical]
-        minimum = values.min(axis=0)
-        span = np.ptp(values, axis=0)
-        span[span == 0] = 1
-        X[:, numerical] = (values - minimum) / span
-    return X
 
 
 class COD:
@@ -73,15 +62,21 @@ class COD:
         order = np.argsort(distances[unlabeled], kind="stable")
         return unlabeled[order[:self.n_neg]]
 
-    def fit(self, X, train_y, nominals):
+    def fit(self, X, train_y, nominals=None):
         """Fit the entire universe with 1=known outlier, 0=unlabeled.
 
         X accepts (n, m) or (n, m, 1); nominals is a Boolean/0-1 column mask.
+        If omitted, columns with 2–5 distinct integer values are categorical.
+        Types are determined before normalization; explicit masks take priority.
         """
         self._fitted = False
         if any(isinstance(v, (bool, np.bool_)) or not isinstance(v, (int, np.integer))
                or v <= 0 for v in (self.n_neg, self.batch_size)):
             raise ValueError("n_neg and batch_size must be positive integers")
+        if not isinstance(self.normalize, (bool, np.bool_)):
+            raise ValueError("normalize must be Boolean")
+        if np.iscomplexobj(X):
+            raise ValueError("X must contain real values")
         X = np.asarray(X, dtype=np.float64)
         if X.ndim == 3 and X.shape[-1] == 1:
             X = X[..., 0]
@@ -90,12 +85,12 @@ class COD:
         if not np.isfinite(X).all():
             raise ValueError("X must contain finite values")
         n, m = X.shape
-        nominal = np.asarray(nominals)
+        nominal = _infer_nominals(X) if nominals is None else np.asarray(nominals)
         if nominal.shape != (m,) or not np.isin(nominal, [0, 1]).all():
             raise ValueError("nominals must be a Boolean/0-1 mask over columns")
         nominal = nominal.astype(bool)
         if self.normalize:
-            X = _minmax_scale(X, nominal)
+            X = minmax_scale(X, nominal)
         numerical = X[:, ~nominal]
         if numerical.size and ((numerical < -1e-12).any()
                                or (numerical > 1 + 1e-12).any()):
@@ -128,6 +123,7 @@ class COD:
                 cardinalities[feature, block] = relation.mean(axis=1)
         self.decision_scores_ = ((1 - cardinalities)
                                  * self.consistencies_[:, None]).mean(axis=0)
+        self.nominals_ = nominal.copy()
         self._fitted = True
         return self
 
